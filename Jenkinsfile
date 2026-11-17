@@ -18,6 +18,18 @@ pipeline {
             }
         }
 
+        stage('Analyze') {
+            steps {
+                echo '=== ANALYZE: analisis estatico con SonarQube ==='
+                script {
+                    def scannerHome = tool 'sonar-scanner'
+                    withSonarQubeEnv('sonarqube') {
+                        sh "${scannerHome}/bin/sonar-scanner"
+                    }
+                }
+            }
+        }
+
         stage('Security Test - Dependency Check') {
             steps {
                 echo '=== SECURITY TEST: OWASP Dependency-Check ==='
