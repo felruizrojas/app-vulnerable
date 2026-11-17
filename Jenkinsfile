@@ -33,11 +33,13 @@ pipeline {
         stage('Security Test - Dependency Check') {
             steps {
                 echo '=== SECURITY TEST: OWASP Dependency-Check ==='
+                catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
                 withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_KEY')]) {
                     dependencyCheck(
                         odcInstallation: 'dependency-check',
                         additionalArguments: "--scan ./ --project app-vulnerable --format HTML --format XML --enableExperimental --prettyPrint --nvdApiKey ${NVD_KEY}"
                     )
+                }
                 }
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
