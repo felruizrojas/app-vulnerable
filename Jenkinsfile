@@ -1,6 +1,11 @@
 pipeline {
     agent any
 
+    environment {
+        TARGET_URL = 'http://app-vulnerable:5000'
+        ZAP_URL    = 'http://zap:8090'
+    }
+
     stages {
 
         stage('Build') {
@@ -30,31 +35,77 @@ pipeline {
             }
         }
 
+        stage('Deploy') {
+            steps {
+                echo '=== DEPLOY: verificando entorno de prueba ==='
+                sh 'curl -s -o /dev/null -w "App desplegada, codigo HTTP: %{http_code}\\n" $TARGET_URL/'
+                sh 'curl -s "$TARGET_URL/hello?name=DeployCheck"'
+            }
+        }
+
         stage('Security Test - Dependency Check') {
             steps {
-                echo '=== SECURITY TEST: OWASP Dependency-Check ==='
+                echo '=== SECURITY TEST (SCA): OWASP Dependency-Check ==='
                 catchError(buildResult: 'UNSTABLE', stageResult: 'FAILURE') {
-                withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_KEY')]) {
-                    dependencyCheck(
-                        odcInstallation: 'dependency-check',
-                        additionalArguments: "--scan ./ --project app-vulnerable --format HTML --format XML --enableExperimental --prettyPrint --nvdApiKey ${NVD_KEY}"
-                    )
-                }
+                    withCredentials([string(credentialsId: 'nvd-api-key', variable: 'NVD_KEY')]) {
+                        dependencyCheck(
+                            odcInstallation: 'dependency-check',
+                            additionalArguments: "--scan ./ --project app-vulnerable --format HTML --format XML --enableExperimental --prettyPrint --nvdApiKey ${NVD_KEY}"
+                        )
+                    }
                 }
                 dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
             }
         }
 
-        stage('Deploy') {
+        stage('Security Test - OWASP ZAP') {
             steps {
-                echo '=== DEPLOY: despliegue de prueba ==='
+                echo '=== SECURITY TEST (DAST): OWASP ZAP ==='
+                sh '''
+                    set -e
+
+                    echo "--- 1. Accediendo a la URL objetivo ---"
+                    curl -s "$ZAP_URL/JSON/core/action/accessUrl/?url=$TARGET_URL/" > /dev/null
+
+                    echo "--- 2. Spider (descubrimiento de rutas) ---"
+                    SPIDER_ID=$(curl -s "$ZAP_URL/JSON/spider/action/scan/?url=$TARGET_URL&recurse=true" | grep -o '[0-9]\\+')
+                    echo "Spider iniciado con ID: $SPIDER_ID"
+                    while true; do
+                        ST=$(curl -s "$ZAP_URL/JSON/spider/view/status/?scanId=$SPIDER_ID" | grep -o '[0-9]\\+')
+                        echo "   Spider: $ST%"
+                        [ "$ST" = "100" ] && break
+                        sleep 3
+                    done
+
+                    echo "--- 3. Alimentando rutas con parametros ---"
+                    curl -s "$ZAP_URL/JSON/core/action/accessUrl/?url=$TARGET_URL/hello%3Fname%3Dtest" > /dev/null
+
+                    echo "--- 4. Active Scan (busqueda activa de vulnerabilidades) ---"
+                    SCAN_ID=$(curl -s "$ZAP_URL/JSON/ascan/action/scan/?url=$TARGET_URL&recurse=true&inScopeOnly=false" | grep -o '[0-9]\\+')
+                    echo "Active Scan iniciado con ID: $SCAN_ID"
+                    while true; do
+                        ST=$(curl -s "$ZAP_URL/JSON/ascan/view/status/?scanId=$SCAN_ID" | grep -o '[0-9]\\+')
+                        echo "   Active Scan: $ST%"
+                        [ "$ST" = "100" ] && break
+                        sleep 5
+                    done
+
+                    echo "--- 5. Generando reportes ---"
+                    curl -s "$ZAP_URL/OTHER/core/other/htmlreport/" -o zap-report.html
+                    curl -s "$ZAP_URL/JSON/core/view/alerts/?baseurl=$TARGET_URL" -o zap-alerts.json
+
+                    echo "--- 6. Resumen de alertas ---"
+                    curl -s "$ZAP_URL/JSON/alert/view/alertsSummary/?baseurl=$TARGET_URL"
+                    echo ""
+                    ls -lh zap-report.html
+                '''
             }
         }
     }
 
     post {
         always {
-            archiveArtifacts artifacts: 'dependency-check-report.*', allowEmptyArchive: true
+            archiveArtifacts artifacts: 'dependency-check-report.*, zap-report.html, zap-alerts.json', allowEmptyArchive: true
         }
     }
 }
